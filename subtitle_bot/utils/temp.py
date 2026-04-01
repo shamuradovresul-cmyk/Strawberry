@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def make_job_dir() -> str:
-    """Create a temporary directory in RAM (/dev/shm) for one processing job."""
+    """Create a temporary directory for one processing job."""
     os.makedirs(TEMP_DIR, exist_ok=True)
     job_dir = tempfile.mkdtemp(dir=TEMP_DIR)
     logger.debug("Created job dir: %s", job_dir)
@@ -17,7 +17,7 @@ def make_job_dir() -> str:
 
 
 def cleanup(job_dir: str) -> None:
-    """Remove the temporary job directory and all its contents from RAM."""
+    """Remove the temporary job directory and all its contents."""
     try:
         shutil.rmtree(job_dir, ignore_errors=True)
         logger.debug("Cleaned up job dir: %s", job_dir)

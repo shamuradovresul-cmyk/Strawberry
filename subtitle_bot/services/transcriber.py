@@ -1,31 +1,30 @@
-import os
-import logging
 import asyncio
-from functools import partial
+import logging
+import os
 from typing import Any
 
 import ffmpeg
-import whisper
+from faster_whisper import WhisperModel
 
 from subtitle_bot.config import WHISPER_MODEL
 
 logger = logging.getLogger(__name__)
 
-# Load model once at module import time — stays in RAM
-_model: whisper.Whisper | None = None
+# Model is loaded once and reused for every request
+_model: WhisperModel | None = None
 
 
-def _get_model() -> whisper.Whisper:
+def _get_model() -> WhisperModel:
     global _model
     if _model is None:
-        logger.info("Loading Whisper model '%s'...", WHISPER_MODEL)
-        _model = whisper.load_model(WHISPER_MODEL)
-        logger.info("Whisper model loaded.")
+        logger.info("Loading faster-whisper model '%s' (int8, CPU)...", WHISPER_MODEL)
+        _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        logger.info("Model loaded.")
     return _model
 
 
 def _extract_audio(video_path: str, audio_path: str) -> None:
-    """Extract mono 16kHz WAV audio from video — required by Whisper."""
+    """Extract mono 16 kHz WAV audio — optimal format for Whisper."""
     (
         ffmpeg
         .input(video_path)
@@ -35,26 +34,26 @@ def _extract_audio(video_path: str, audio_path: str) -> None:
     )
 
 
-def _run_transcribe(audio_path: str) -> dict[str, Any]:
+def _run_transcribe(audio_path: str) -> tuple[list[dict], str]:
     model = _get_model()
-    return model.transcribe(
+    # vad_filter=True uses Voice Activity Detection — skips silence,
+    # eliminates hallucinations without extra parameters
+    segments_iter, info = model.transcribe(
         audio_path,
-        task="transcribe",
-        verbose=False,
-        # Suppress hallucinations during silence/music
-        no_speech_threshold=0.6,
-        logprob_threshold=-1.0,
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500),
     )
-
-
-def preload() -> None:
-    """Pre-load the Whisper model at bot startup so the first request isn't slow."""
-    _get_model()
+    segments = [
+        {"start": s.start, "end": s.end, "text": s.text}
+        for s in segments_iter
+    ]
+    return segments, info.language
 
 
 async def transcribe(video_path: str, job_dir: str) -> tuple[list[dict], str]:
     """
-    Extract audio from video and transcribe with Whisper.
+    Extract audio from video and transcribe with faster-whisper.
 
     Returns:
         segments: list of {"start": float, "end": float, "text": str}
@@ -67,17 +66,20 @@ async def transcribe(video_path: str, job_dir: str) -> tuple[list[dict], str]:
         None, _extract_audio, video_path, audio_path
     )
 
-    logger.info("Transcribing audio with Whisper model '%s'...", WHISPER_MODEL)
-    result = await asyncio.get_event_loop().run_in_executor(
+    logger.info("Transcribing with faster-whisper '%s'...", WHISPER_MODEL)
+    segments, language = await asyncio.get_event_loop().run_in_executor(
         None, _run_transcribe, audio_path
     )
 
-    os.remove(audio_path)
+    try:
+        os.remove(audio_path)
+    except OSError:
+        pass
 
-    segments: list[dict] = [
-        {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
-        for seg in result["segments"]
-    ]
-    language: str = result.get("language", "unknown")
-    logger.info("Transcription done. Language: %s, segments: %d", language, len(segments))
+    logger.info("Done. Language: %s, segments: %d", language, len(segments))
     return segments, language
+
+
+def preload() -> None:
+    """Pre-load model at bot startup so the first request isn't slow."""
+    _get_model()

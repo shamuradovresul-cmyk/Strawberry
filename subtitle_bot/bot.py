@@ -15,37 +15,35 @@ logger = logging.getLogger(__name__)
 
 
 async def _on_startup(app: Application) -> None:
-    # Pre-load Whisper model so the first user request isn't slow
     logger.info("Pre-loading Whisper model...")
     await asyncio.get_event_loop().run_in_executor(None, preload_whisper)
     logger.info("Whisper model ready.")
-
-    # Semaphore: only 1 video processed at a time (Whisper is very memory-heavy)
     app.bot_data["semaphore"] = asyncio.Semaphore(1)
 
 
 def main() -> None:
-    logger.info("Starting subtitle bot (local API: %s)", LOCAL_API_URL)
+    builder = Application.builder().token(BOT_TOKEN)
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .base_url(f"{LOCAL_API_URL}/bot")
-        .base_file_url(f"{LOCAL_API_URL}/file/bot")
-        .local_mode(True)
-        .post_init(_on_startup)
-        .build()
-    )
-
-    # Accept both native video and video sent as document (file)
-    app.add_handler(
-        MessageHandler(
-            filters.VIDEO | filters.Document.VIDEO,
-            handle_video,
+    if LOCAL_API_URL:
+        # Local Bot API Server — no file size limits
+        logger.info("Using Local Bot API Server: %s", LOCAL_API_URL)
+        builder = (
+            builder
+            .base_url(f"{LOCAL_API_URL}/bot")
+            .base_file_url(f"{LOCAL_API_URL}/file/bot")
+            .local_mode(True)
         )
+    else:
+        # Standard Telegram API — files limited to 50 MB
+        logger.info("Using standard Telegram API (50 MB file limit)")
+
+    app = builder.post_init(_on_startup).build()
+
+    app.add_handler(
+        MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video)
     )
 
-    logger.info("Bot is running. Waiting for videos...")
+    logger.info("Bot is running...")
     app.run_polling(drop_pending_updates=True)
 
 

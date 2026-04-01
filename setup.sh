@@ -1,95 +1,69 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# setup.sh — One-shot server setup for the Telegram Subtitle Bot
-# Tested on Ubuntu 22.04 / Debian 12
-# Run as root: bash setup.sh
+# setup.sh — Установка бота на чистый Ubuntu/Debian сервер
+# Запускай от рута: bash setup.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
+ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
+warn() { echo -e "${YELLOW}[!]${NC} $*"; }
+err()  { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-# ── 0. Root check ─────────────────────────────────────────────────────────────
-[[ $EUID -eq 0 ]] || error "Run this script as root (sudo bash setup.sh)"
+[[ $EUID -eq 0 ]] || err "Запусти скрипт от рута: sudo bash setup.sh"
 
-# ── 1. System update ──────────────────────────────────────────────────────────
-info "Updating system packages..."
-apt-get update -qq && apt-get upgrade -y -qq
+# ── 1. Системные пакеты ───────────────────────────────────────────────────────
+ok "Обновляю пакеты..."
+apt-get update -qq
+apt-get install -y -qq python3 python3-pip python3-venv ffmpeg git screen
 
-# ── 2. Install Docker ─────────────────────────────────────────────────────────
-if command -v docker &>/dev/null; then
-    info "Docker already installed: $(docker --version)"
-else
-    info "Installing Docker..."
-    apt-get install -y -qq ca-certificates curl gnupg lsb-release
-    curl -fsSL https://get.docker.com | sh
-    systemctl enable docker
-    systemctl start docker
-    info "Docker installed: $(docker --version)"
+ok "Системные пакеты установлены."
+
+# ── 2. Папка проекта ──────────────────────────────────────────────────────────
+PROJ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJ_DIR"
+ok "Папка проекта: $PROJ_DIR"
+
+# ── 3. Python окружение ───────────────────────────────────────────────────────
+if [[ ! -d venv ]]; then
+    ok "Создаю виртуальное окружение Python..."
+    python3 -m venv venv
 fi
 
-# ── 3. Install docker compose plugin ──────────────────────────────────────────
-if docker compose version &>/dev/null 2>&1; then
-    info "docker compose already available: $(docker compose version)"
-else
-    info "Installing docker-compose-plugin..."
-    apt-get install -y -qq docker-compose-plugin
-fi
+ok "Устанавливаю Python зависимости (может занять 2-5 минут)..."
+venv/bin/pip install --upgrade pip -q
+venv/bin/pip install -r requirements.txt -q
+ok "Python зависимости установлены."
 
-# ── 4. Expand /dev/shm for large video processing (default is 50% RAM) ────────
-RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-# Use 80% of RAM for /dev/shm
-SHM_GB=$(( RAM_KB * 80 / 100 / 1024 / 1024 ))
-[[ $SHM_GB -lt 2 ]] && SHM_GB=2   # minimum 2 GB
-
-info "Remounting /dev/shm with size=${SHM_GB}g (80% of RAM)..."
-mount -o remount,size=${SHM_GB}g /dev/shm || warn "Could not remount /dev/shm — using default size"
-
-# Make it persistent across reboots
-if ! grep -q "tmpfs /dev/shm" /etc/fstab; then
-    echo "tmpfs /dev/shm tmpfs defaults,size=${SHM_GB}g 0 0" >> /etc/fstab
-    info "Added /dev/shm mount to /etc/fstab"
-fi
-
-# ── 5. Create .env if missing ─────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-
+# ── 4. .env файл ──────────────────────────────────────────────────────────────
 if [[ ! -f .env ]]; then
-    if [[ -f .env.example ]]; then
-        cp .env.example .env
-        warn ".env created from .env.example"
-        warn "Fill in BOT_TOKEN, TELEGRAM_API_ID, TELEGRAM_API_HASH before starting!"
-    else
-        error ".env.example not found. Are you running this from the project root?"
-    fi
-else
-    info ".env already exists — skipping copy"
-fi
-
-# ── 6. Check that required vars are set ───────────────────────────────────────
-source .env 2>/dev/null || true
-
-missing=()
-[[ -z "${BOT_TOKEN:-}"        ]] && missing+=("BOT_TOKEN")
-[[ -z "${TELEGRAM_API_ID:-}"  ]] && missing+=("TELEGRAM_API_ID")
-[[ -z "${TELEGRAM_API_HASH:-}"] && missing+=("TELEGRAM_API_HASH")
-
-if [[ ${#missing[@]} -gt 0 ]]; then
-    warn "The following variables are not set in .env:"
-    for v in "${missing[@]}"; do warn "  - $v"; done
-    warn "Edit .env and then run:  docker compose up -d --build"
+    cp .env.example .env
+    warn ".env создан. Открой его и вставь свой BOT_TOKEN:"
+    warn "  nano .env"
+    warn "После этого запусти бота: bash start.sh"
     exit 0
 fi
 
-# ── 7. Build and start ────────────────────────────────────────────────────────
-info "Building and starting containers..."
-docker compose up -d --build
+ok ".env найден."
 
-info ""
-info "✅ Done! Bot is running."
-info "   Logs:    docker compose logs -f subtitle-bot"
-info "   Stop:    docker compose down"
-info "   Restart: docker compose restart subtitle-bot"
+# ── 5. Создаём скрипт запуска ─────────────────────────────────────────────────
+cat > start.sh << 'STARTSCRIPT'
+#!/usr/bin/env bash
+cd "$(dirname "$0")"
+echo "Запускаю бота в фоне (screen)..."
+screen -dmS subtitle_bot venv/bin/python -m subtitle_bot.bot
+echo ""
+echo "Бот запущен!"
+echo "  Логи:       screen -r subtitle_bot"
+echo "  Выйти из логов: Ctrl+A затем D"
+echo "  Остановить: screen -S subtitle_bot -X quit"
+STARTSCRIPT
+chmod +x start.sh
+
+# ── 6. Запуск ─────────────────────────────────────────────────────────────────
+ok "Запускаю бота..."
+bash start.sh
+
+ok ""
+ok "Всё готово!"
+ok "Проверь логи: screen -r subtitle_bot"
