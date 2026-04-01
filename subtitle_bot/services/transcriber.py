@@ -37,7 +37,19 @@ def _extract_audio(video_path: str, audio_path: str) -> None:
 
 def _run_transcribe(audio_path: str) -> dict[str, Any]:
     model = _get_model()
-    return model.transcribe(audio_path, task="transcribe", verbose=False)
+    return model.transcribe(
+        audio_path,
+        task="transcribe",
+        verbose=False,
+        # Suppress hallucinations during silence/music
+        no_speech_threshold=0.6,
+        logprob_threshold=-1.0,
+    )
+
+
+def preload() -> None:
+    """Pre-load the Whisper model at bot startup so the first request isn't slow."""
+    _get_model()
 
 
 async def transcribe(video_path: str, job_dir: str) -> tuple[list[dict], str]:

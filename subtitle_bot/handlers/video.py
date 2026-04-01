@@ -105,9 +105,19 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
+    # Limit to 1 concurrent job (Whisper medium uses ~5 GB RAM)
+    semaphore: asyncio.Semaphore = context.bot_data["semaphore"]
+    if semaphore.locked():
+        await msg.reply_text(
+            "⏳ Бот сейчас обрабатывает другое видео. Попробуй через несколько минут."
+        )
+        return
+
     # Acknowledge and start processing
     status_msg = await msg.reply_text("⏳ Принял видео, начинаю обработку...")
 
-    asyncio.create_task(
-        _process_video(update, context, status_msg, file_id, duration)
-    )
+    async def _run_with_semaphore() -> None:
+        async with semaphore:
+            await _process_video(update, context, status_msg, file_id, duration)
+
+    asyncio.create_task(_run_with_semaphore())
